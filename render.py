@@ -1,9 +1,9 @@
-"""Draw the one-page world news summary for Tuesday 24 November 2026.
+"""Renderer for a single-page world-news poster dated 24 November 2026.
 
-Running this file creates entry.png next to it: a newspaper front
-page with one lead story (a simple ship-and-waves graphic) and five
-short numbered stories plus a sport note.  All text, colours and
-coordinates are fixed, so the drawing is fully deterministic.
+Executing this module produces ``entry.png`` beside it.  The page is
+assembled from small declarative tables below -- masthead lines, the
+lead story, its fact panel and the numbered briefs -- and one drawing
+pass walks those tables in order, so the output stays reproducible.
 """
 
 import sys
@@ -11,166 +11,245 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-HERE = Path(__file__).resolve().parent
-OUT_FILE = HERE / "entry.png"
+# --- locations ---------------------------------------------------------
+MODULE_DIR = Path(__file__).resolve().parent
+TARGET_PATH = MODULE_DIR / "entry.png"
+TYPE_DIR = Path("/usr/share/fonts/truetype/dejavu")
+TYPE_PLAIN = str(TYPE_DIR / "DejaVuSans.ttf")
+TYPE_STRONG = str(TYPE_DIR / "DejaVuSans-Bold.ttf")
+TYPE_SERIF_STRONG = str(TYPE_DIR / "DejaVuSerif-Bold.ttf")
 
-W = 1024
-H = 1024
+# --- geometry and palette ----------------------------------------------
+CANVAS_W = 1024
+CANVAS_H = 1024
+MARGIN_LEFT = 52
+CONTENT_RIGHT = 972
+CONTENT_WIDTH = 920
 
-PAPER = (250, 246, 236)
-INK = (22, 22, 22)
-GREY = (96, 92, 82)
-RED = (178, 34, 34)
-NAVY = (16, 58, 96)
-AMBER = (198, 140, 28)
-ALT = (240, 235, 220)
-WHITE = (255, 255, 255)
-CREAM = (255, 226, 140)
+COLOUR_PAGE = (250, 246, 236)
+COLOUR_TEXT = (22, 22, 22)
+COLOUR_MUTED = (96, 92, 82)
+COLOUR_ACCENT = (178, 34, 34)
+COLOUR_PANEL = (16, 58, 96)
+COLOUR_RULE_GOLD = (198, 140, 28)
+COLOUR_ROW_SHADE = (240, 235, 220)
+COLOUR_BRIGHT = (255, 255, 255)
+COLOUR_PALE_GOLD = (255, 226, 140)
+COLOUR_SEA = (120, 190, 210)
 
-FONTS = Path("/usr/share/fonts/truetype/dejavu")
-SANS = str(FONTS / "DejaVuSans.ttf")
-SANS_B = str(FONTS / "DejaVuSans-Bold.ttf")
-SERIF_B = str(FONTS / "DejaVuSerif-Bold.ttf")
+# --- copy tables ---------------------------------------------------------
+# Each masthead entry: (vertical position, wording, typeface, size, colour).
+MASTHEAD_LINES = (
+    (32, "THE  WORLD  TODAY", TYPE_SERIF_STRONG, 34, COLOUR_TEXT),
+    (76, "Tuesday  24 November 2026", TYPE_STRONG, 46, COLOUR_ACCENT),
+    (132, "The day's world news on one page", TYPE_PLAIN, 23, COLOUR_MUTED),
+)
+
+LEAD_KICKER = "1  \u2022  STRAIT OF HORMUZ"
+LEAD_HEADLINE = "25 seafarers dead, UN counts the toll"
+LEAD_SUMMARY = (
+    "The United Nations counts 25 seafarers killed around the "
+    "vital waterway as the standoff over the strait deepens."
+)
+
+# Fact lines printed inside the lead panel, top to bottom.
+PANEL_FACTS = (
+    "UN toll: 25 seafarers killed",
+    "Around the Strait of Hormuz",
+    "Diplomacy stalled as tensions rise",
+)
+PANEL_BOX = (52, 348, 972, 470)
+
+# Numbered briefs below the lead: (number, section label, body copy).
+BRIEF_ROWS = (
+    (2, "INDIA \u2014 NEPAL",
+     "India pledges $1.6 billion to help Nepal rebuild after the "
+     "floods, and the two prime ministers flag off the new "
+     "Saryu-Kamala Express train."),
+    (3, "TECH \u2014 NVIDIA",
+     "Jensen Huang returns as Nvidia chief, just 11 days after "
+     "stepping down amid a 'spy' controversy."),
+    (4, "BALTIC \u2014 GULF OF FINLAND",
+     "Russian cargo ship Sparta II catches fire after a drone "
+     "attack off the coast of Finland."),
+    (5, "FOOTBALL \u2014 AFCON 2025",
+     "The Africa Cup title hangs on a court ruling: CAS decides "
+     "Senegal's appeal against Morocco on Tuesday."),
+    (6, "PORTUGAL \u2014 LISBON",
+     "Thousands march in Lisbon against the rising cost of "
+     "living, as protests over prices spread."),
+)
+BRIEF_FIRST_TOP = 482
+BRIEF_ROW_HEIGHT = 90
+
+SPORT_LINE = "SPORT  \u2022  World Chess Championship opens in Geneva."
+FOOTER_LINE = (
+    "Sources: Reuters  \u2022  AFP  \u2022  Ukrinform  \u2022  "
+    "The Straits Times  \u2022  One page, no exaggeration."
+)
 
 
-def font(path, size):
+def load_typeface(path, size):
+    """Return a TrueType face for ``path`` at ``size`` points."""
     return ImageFont.truetype(path, size)
 
 
-def fit_lines(draw, text, fnt, width):
-    """Greedy word wrap into lines no wider than width pixels."""
-    out = []
-    cur = ""
-    for word in text.split():
-        trial = word if not cur else cur + " " + word
-        if draw.textlength(trial, font=fnt) <= width:
-            cur = trial
+def wrap_copy(draw, wording, face, max_width):
+    """Split ``wording`` greedily so no line exceeds ``max_width``."""
+    lines = []
+    pending = ""
+    for token in wording.split():
+        candidate = token if not pending else pending + " " + token
+        if draw.textlength(candidate, font=face) <= max_width:
+            pending = candidate
         else:
-            if cur:
-                out.append(cur)
-            cur = word
-    if cur:
-        out.append(cur)
-    return out
+            if pending:
+                lines.append(pending)
+            pending = token
+    if pending:
+        lines.append(pending)
+    return lines
 
 
-def para(draw, x, y, text, fnt, fill, width, step):
-    for line in fit_lines(draw, text, fnt, width):
-        draw.text((x, y), line, font=fnt, fill=fill)
-        y += step
-    return y
+def stamp_paragraph(draw, left, top, wording, face, colour, max_width, leading):
+    """Draw wrapped copy starting at (left, top); return the next free y."""
+    cursor_y = top
+    for line in wrap_copy(draw, wording, face, max_width):
+        draw.text((left, cursor_y), line, font=face, fill=colour)
+        cursor_y += leading
+    return cursor_y
 
 
-def centre(draw, y, text, fnt, fill):
-    w = draw.textlength(text, font=fnt)
-    draw.text(((W - w) / 2, y), text, font=fnt, fill=fill)
+def stamp_centred(draw, top, wording, face, colour):
+    """Draw one line centred horizontally on the canvas."""
+    text_w = draw.textlength(wording, font=face)
+    draw.text(((CANVAS_W - text_w) / 2, top), wording, font=face, fill=colour)
 
 
-def lead_graphic(draw):
-    """Strait of Hormuz: a small cargo ship on waves, dark navy panel."""
-    x0, y0, x1, y1 = 52, 348, 972, 470
-    draw.rounded_rectangle([x0, y0, x1, y1], radius=16, fill=NAVY)
-    # hull
-    draw.polygon([(96, 432), (260, 432), (238, 452), (118, 452)], fill=RED)
-    # containers
-    draw.rectangle([112, 404, 150, 432], fill=CREAM)
-    draw.rectangle([156, 412, 194, 432], fill=WHITE)
-    draw.rectangle([200, 404, 238, 432], fill=(120, 190, 210))
-    # funnel
-    draw.rectangle([216, 388, 238, 404], fill=INK)
-    # waves, kept under the ship so they never touch the fact lines
-    for yy in (456, 462):
-        pts = []
-        for xx in range(96, 288, 24):
-            pts.append((xx, yy + (6 if (xx // 24) % 2 else -6)))
-        draw.line(pts, fill=(120, 190, 210), width=3)
-    facts = [
-        "UN toll: 25 seafarers killed",
-        "Around the Strait of Hormuz",
-        "Diplomacy stalled as tensions rise",
-    ]
-    fy = y0 + 18
-    ff = font(SANS_B, 24)
-    for line in facts:
-        draw.text((300, fy), line, font=ff, fill=CREAM)
-        fy += 38
+def paint_lead_panel(draw):
+    """Paint the navy lead panel: ship shapes, wave lines and fact copy."""
+    box_left, box_top, box_right, box_bottom = PANEL_BOX
+    draw.rounded_rectangle(
+        [box_left, box_top, box_right, box_bottom], radius=16, fill=COLOUR_PANEL
+    )
+    # Ship silhouette: hull first, then its stacked cargo and funnel.
+    draw.polygon(
+        [(96, 432), (260, 432), (238, 452), (118, 452)], fill=COLOUR_ACCENT
+    )
+    cargo_blocks = (
+        ([112, 404, 150, 432], COLOUR_PALE_GOLD),
+        ([156, 412, 194, 432], COLOUR_BRIGHT),
+        ([200, 404, 238, 432], COLOUR_SEA),
+    )
+    for block_box, block_colour in cargo_blocks:
+        draw.rectangle(block_box, fill=block_colour)
+    draw.rectangle([216, 388, 238, 404], fill=COLOUR_TEXT)
+    # Two zig-zag wave strokes sit low in the panel, clear of the facts.
+    for wave_y in (456, 462):
+        wave_points = []
+        for wave_x in range(96, 288, 24):
+            offset = 6 if (wave_x // 24) % 2 else -6
+            wave_points.append((wave_x, wave_y + offset))
+        draw.line(wave_points, fill=COLOUR_SEA, width=3)
+    fact_face = load_typeface(TYPE_STRONG, 24)
+    fact_y = box_top + 18
+    for fact in PANEL_FACTS:
+        draw.text((300, fact_y), fact, font=fact_face, fill=COLOUR_PALE_GOLD)
+        fact_y += 38
 
 
-def brief(draw, top, num, tag, text):
-    """One numbered story row."""
-    if num % 2 == 0:
-        draw.rectangle([36, top, 988, top + 90], fill=ALT)
-    cx, cy = 80, top + 45
-    draw.ellipse([cx - 25, cy - 25, cx + 25, cy + 25], fill=RED)
-    bf = font(SANS_B, 27)
-    label = str(num)
-    lw = draw.textlength(label, font=bf)
-    draw.text((cx - lw / 2, cy - 15), label, font=bf, fill=WHITE)
-    draw.text((122, top + 6), tag, font=font(SANS_B, 23), fill=INK)
-    para(draw, 122, top + 34, text, font(SANS, 23), INK, 846, 26)
+def paint_brief_row(draw, top, number, label, body):
+    """Paint one numbered brief: optional shading, badge, label and body."""
+    if number % 2 == 0:
+        draw.rectangle(
+            [36, top, 988, top + BRIEF_ROW_HEIGHT], fill=COLOUR_ROW_SHADE
+        )
+    badge_cx, badge_cy = 80, top + 45
+    draw.ellipse(
+        [badge_cx - 25, badge_cy - 25, badge_cx + 25, badge_cy + 25],
+        fill=COLOUR_ACCENT,
+    )
+    badge_face = load_typeface(TYPE_STRONG, 27)
+    numeral = str(number)
+    numeral_w = draw.textlength(numeral, font=badge_face)
+    draw.text(
+        (badge_cx - numeral_w / 2, badge_cy - 15),
+        numeral,
+        font=badge_face,
+        fill=COLOUR_BRIGHT,
+    )
+    draw.text(
+        (122, top + 6), label,
+        font=load_typeface(TYPE_STRONG, 23), fill=COLOUR_TEXT,
+    )
+    stamp_paragraph(
+        draw, 122, top + 34, body,
+        load_typeface(TYPE_PLAIN, 23), COLOUR_TEXT, 846, 26,
+    )
 
 
-def build():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-    d.rectangle([14, 14, W - 14, H - 14], outline=INK, width=3)
-    centre(d, 32, "THE  WORLD  TODAY", font(SERIF_B, 34), INK)
-    centre(d, 76, "Tuesday  24 November 2026", font(SANS_B, 46), RED)
-    centre(d, 132, "The day's world news on one page",
-           font(SANS, 23), GREY)
-    d.rectangle([52, 166, 972, 172], fill=RED)
-    d.text((52, 186), "1  \u2022  STRAIT OF HORMUZ",
-           font=font(SANS_B, 25), fill=NAVY)
-    para(d, 52, 216, "25 seafarers dead, UN counts the toll",
-         font(SERIF_B, 42), INK, 920, 50)
-    para(d, 52, 272,
-         "The United Nations counts 25 seafarers killed around the "
-         "vital waterway as the standoff over the strait deepens.",
-         font(SANS, 24), INK, 920, 29)
-    lead_graphic(d)
-    stories = [
-        (2, "INDIA \u2014 NEPAL",
-         "India pledges $1.6 billion to help Nepal rebuild after the "
-         "floods, and the two prime ministers flag off the new "
-         "Saryu-Kamala Express train."),
-        (3, "TECH \u2014 NVIDIA",
-         "Jensen Huang returns as Nvidia chief, just 11 days after "
-         "stepping down amid a 'spy' controversy."),
-        (4, "BALTIC \u2014 GULF OF FINLAND",
-         "Russian cargo ship Sparta II catches fire after a drone "
-         "attack off the coast of Finland."),
-        (5, "FOOTBALL \u2014 AFCON 2025",
-         "The Africa Cup title hangs on a court ruling: CAS decides "
-         "Senegal's appeal against Morocco on Tuesday."),
-        (6, "PORTUGAL \u2014 LISBON",
-         "Thousands march in Lisbon against the rising cost of "
-         "living, as protests over prices spread."),
-    ]
-    y = 482
-    for num, tag, text in stories:
-        brief(d, y, num, tag, text)
-        y += 90
-    d.rectangle([52, y + 2, 972, y + 8], fill=AMBER)
-    d.text((52, y + 16),
-           "SPORT  \u2022  World Chess Championship opens in Geneva.",
-           font=font(SANS_B, 23), fill=NAVY)
-    d.text((52, 978),
-           "Sources: Reuters  \u2022  AFP  \u2022  Ukrinform  \u2022  "
-           "The Straits Times  \u2022  One page, no exaggeration.",
-           font=font(SANS, 20), fill=GREY)
-    return img
+def assemble_page():
+    """Compose the whole poster and return it as an RGB image."""
+    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), COLOUR_PAGE)
+    pen = ImageDraw.Draw(canvas)
+
+    pen.rectangle(
+        [14, 14, CANVAS_W - 14, CANVAS_H - 14], outline=COLOUR_TEXT, width=3
+    )
+    for line_top, line_text, line_path, line_size, line_colour in MASTHEAD_LINES:
+        stamp_centred(
+            pen, line_top, line_text,
+            load_typeface(line_path, line_size), line_colour,
+        )
+    pen.rectangle([52, 166, 972, 172], fill=COLOUR_ACCENT)
+
+    # Lead story block, in reading order: kicker, headline, summary, panel.
+    pen.text(
+        (MARGIN_LEFT, 186), LEAD_KICKER,
+        font=load_typeface(TYPE_STRONG, 25), fill=COLOUR_PANEL,
+    )
+    stamp_paragraph(
+        pen, MARGIN_LEFT, 216, LEAD_HEADLINE,
+        load_typeface(TYPE_SERIF_STRONG, 42), COLOUR_TEXT, CONTENT_WIDTH, 50,
+    )
+    stamp_paragraph(
+        pen, MARGIN_LEFT, 272, LEAD_SUMMARY,
+        load_typeface(TYPE_PLAIN, 24), COLOUR_TEXT, CONTENT_WIDTH, 29,
+    )
+    paint_lead_panel(pen)
+
+    # The briefs share one vertical rhythm; the sport strip follows them.
+    row_top = BRIEF_FIRST_TOP
+    for row_number, row_label, row_body in BRIEF_ROWS:
+        paint_brief_row(pen, row_top, row_number, row_label, row_body)
+        row_top += BRIEF_ROW_HEIGHT
+    pen.rectangle(
+        [MARGIN_LEFT, row_top + 2, CONTENT_RIGHT, row_top + 8],
+        fill=COLOUR_RULE_GOLD,
+    )
+    pen.text(
+        (MARGIN_LEFT, row_top + 16), SPORT_LINE,
+        font=load_typeface(TYPE_STRONG, 23), fill=COLOUR_PANEL,
+    )
+    pen.text(
+        (MARGIN_LEFT, 978), FOOTER_LINE,
+        font=load_typeface(TYPE_PLAIN, 20), fill=COLOUR_MUTED,
+    )
+    return canvas
 
 
-def main():
-    page = build()
-    page.save(OUT_FILE, format="PNG", optimize=True)
-    print(f"wrote {OUT_FILE} ({OUT_FILE.stat().st_size} bytes)")
+def run():
+    """Render the poster, save it as PNG and report what was written."""
+    poster = assemble_page()
+    poster.save(TARGET_PATH, format="PNG", optimize=True)
+    byte_count = TARGET_PATH.stat().st_size
+    print(f"wrote {TARGET_PATH} ({byte_count} bytes)")
     print(
-        f"diagnostic: rendered {OUT_FILE.name}: "
-        f"{page.size[0]}x{page.size[1]}px, {OUT_FILE.stat().st_size} bytes",
+        f"diagnostic: rendered {TARGET_PATH.name}: "
+        f"{poster.size[0]}x{poster.size[1]}px, {byte_count} bytes",
         file=sys.stderr,
     )
 
 
 if __name__ == "__main__":
-    main()
+    run()
