@@ -11,6 +11,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE / "entry.png"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def target_path():
@@ -22,6 +23,8 @@ def target_path():
 
 def main():
     data = SOURCE.read_bytes()
+    if not data.startswith(PNG_MAGIC):
+        raise SystemExit(f"{SOURCE} is not a PNG file, refusing to copy")
     target = target_path()
     target.write_bytes(data)
     print(f"wrote {target} ({len(data)} bytes)")
