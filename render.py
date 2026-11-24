@@ -6,6 +6,7 @@ short numbered stories plus a sport note.  All text, colours and
 coordinates are fixed, so the drawing is fully deterministic.
 """
 
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -164,6 +165,11 @@ def main():
     page = build()
     page.save(OUT_FILE, format="PNG", optimize=True)
     print(f"wrote {OUT_FILE} ({OUT_FILE.stat().st_size} bytes)")
+    print(
+        f"diagnostic: rendered {OUT_FILE.name}: "
+        f"{page.size[0]}x{page.size[1]}px, {OUT_FILE.stat().st_size} bytes",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
